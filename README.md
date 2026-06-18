@@ -3,7 +3,7 @@
 A high-performance, cinematic demoscene visualization of iterated spatial deformations built with WebGL, GLSL, and Three.js.
 
 ## 🌟 Live Demo
-*(After you push to GitHub, enable GitHub Pages and put your link here: `https://yourusername.github.io/webgl-iterated-sdf`)*
+*(https://yin-renlong.github.io/webgl-iterated-sdf/`)*
 
 ## 🧮 The Mathematics
 This project visualizes the recursive application of a spatial deformation function using Signed Distance Fields (SDFs) and Raymarching. 
