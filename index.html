@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Iterated SDF Deformation - Cinematic Angle</title>
+  <style>
+    html, body {
+      margin: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #07080a; font-family: system-ui, -apple-system, sans-serif;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    #ui {
+      position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 10;
+      min-width: min(820px, calc(100vw - 28px)); box-sizing: border-box; padding: 14px 18px 16px;
+      border-radius: 18px; color: rgba(255,255,255,0.92); background: rgba(18, 20, 27, 0.58);
+      border: 1px solid rgba(255,255,255,0.16); box-shadow: 0 18px 60px rgba(0,0,0,0.42);
+      backdrop-filter: blur(16px) saturate(130%); -webkit-backdrop-filter: blur(16px) saturate(130%);
+      text-align: center; user-select: none;
+    }
+    #formula { font-family: Georgia, serif; font-style: italic; font-size: clamp(20px, 3.2vw, 32px); letter-spacing: 0.02em; margin-bottom: 12px; line-height: 1.15; text-shadow: 0 2px 18px rgba(0,0,0,0.8); }
+    #formula sup { font-size: 0.58em; line-height: 0; }
+    .button-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 12px; }
+    button { appearance: none; border: 1px solid rgba(255,255,255,0.18); border-radius: 999px; padding: 8px 13px; color: rgba(255,255,255,0.88); background: rgba(255,255,255,0.08); cursor: pointer; font-weight: 650; letter-spacing: 0.01em; transition: background 160ms, border-color 160ms, transform 120ms; }
+    button:hover { background: rgba(255,255,255,0.16); border-color: rgba(255,255,255,0.34); transform: translateY(-1px); }
+    button.active { background: linear-gradient(135deg, rgba(70,170,255,0.55), rgba(255,70,210,0.42)); border-color: rgba(255,255,255,0.58); color: white; }
+    .scrub-row { display: grid; grid-template-columns: auto minmax(190px, 1fr) auto auto; align-items: center; gap: 10px; font-size: 13px; color: rgba(255,255,255,0.72); }
+    input[type="range"] { width: 100%; accent-color: #7ad7ff; cursor: pointer; }
+    #valueReadout { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; color: rgba(255,255,255,0.88); }
+    #note { margin-top: 8px; font-size: 11px; color: rgba(255,255,255,0.46); letter-spacing: 0.025em; }
+    @media (max-width: 620px) { #ui { padding: 12px; } .scrub-row { grid-template-columns: 1fr; } #valueReadout { text-align: center; } }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="formula">||p|| = 1</div>
+    <div class="button-row">
+      <button data-state="0" class="state-btn active">Sphere</button>
+      <button data-state="1" class="state-btn">f(p)</button>
+      <button data-state="2" class="state-btn">f²(p)</button>
+      <button data-state="3" class="state-btn">f³(p)</button>
+      <button data-state="4" class="state-btn">f⁴(p)</button>
+    </div>
+    <div class="scrub-row">
+      <span>u_transition</span>
+      <input id="transitionSlider" type="range" min="0" max="4" step="0.001" value="0" />
+      <span id="valueReadout">0.000</span>
+      <button id="autoButton" class="active">Auto-Morph: ON</button>
+    </div>
+    <div id="note">Cinematic Mirror Floor Enabled</div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+    const vertexShader = `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`;
+
+    const fragmentShader = `
+      precision highp float;
+      uniform vec2 u_resolution; uniform float u_time; uniform float u_transition;
+      uniform vec3 u_camPos; uniform mat4 u_camToWorld; uniform float u_fov;
+      varying vec2 vUv;
+
+      #define PI 3.14159265359
+      #define BOUND_RADIUS 2.5
+      
+      // I RAISED THE FLOOR CLOSER TO THE OBJECT HERE (-2.18 to -1.75)
+      #define FLOOR_Y -1.75 
+
+      #define MAX_STEPS 384
+      #define SURF_DIST 0.00038
+      #define NORMAL_EPS 0.0016
+
+      vec3 deform(vec3 p) { return p + 0.5 * sin(PI * p.yzx); }
+      vec3 morphedPoint(vec3 p) {
+        vec3 s0 = p; vec3 s1 = deform(s0); vec3 s2 = deform(s1); vec3 s3 = deform(s2); vec3 s4 = deform(s3);
+        float t = clamp(u_transition, 0.0, 4.0);
+        if (t < 1.0) return mix(s0, s1, t); if (t < 2.0) return mix(s1, s2, t - 1.0);
+        if (t < 3.0) return mix(s2, s3, t - 2.0); return mix(s3, s4, t - 3.0);
+      }
+
+      float GetDist(vec3 p) {
+        vec3 q = morphedPoint(p);
+        float shapeDist = length(q) - 1.0;
+        float boundDist = length(p) - BOUND_RADIUS;
+        float t = clamp(u_transition, 0.0, 4.0);
+        float safetyFactor = 0.4 * exp(-0.65 * t);
+        return max(shapeDist * safetyFactor, boundDist);
+      }
+
+      vec3 GetNormal(vec3 p) {
+        vec2 e = vec2(NORMAL_EPS, 0.0);
+        return normalize(vec3(
+            GetDist(p + e.xyy) - GetDist(p - e.xyy),
+            GetDist(p + e.yxy) - GetDist(p - e.yxy),
+            GetDist(p + e.yyx) - GetDist(p - e.yyx)
+        ));
+      }
+
+      bool raySphere(vec3 ro, vec3 rd, float radius, out float tNear, out float tFar) {
+        float b = dot(ro, rd); float c = dot(ro, ro) - radius * radius; float h = b * b - c;
+        if (h < 0.0) return false;
+        h = sqrt(h); tNear = -b - h; tFar  = -b + h; return tFar > 0.0;
+      }
+
+      float RayMarchShape(vec3 ro, vec3 rd, float tMin, float tMax, out int stepsTaken) {
+        float dO = max(tMin, 0.0); stepsTaken = 0;
+        for (int i = 0; i < MAX_STEPS; i++) {
+          vec3 p = ro + rd * dO; float dS = GetDist(p);
+          if (dS < SURF_DIST) { stepsTaken = i; return dO; }
+          dO += max(dS, 0.00028);
+          if (dO > tMax) { stepsTaken = i; break; }
+        }
+        return -1.0;
+      }
+
+      bool intersectFloor(vec3 ro, vec3 rd, out float t) {
+        if (abs(rd.y) < 0.0001) { t = -1.0; return false; }
+        t = (FLOOR_Y - ro.y) / rd.y; return t > 0.0;
+      }
+
+      vec3 environmentColor(vec3 rd) {
+        float y = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 bottom = vec3(0.038, 0.040, 0.046); vec3 top = vec3(0.130, 0.137, 0.150);
+        vec3 col = mix(bottom, top, smoothstep(0.0, 1.0, y));
+        float horizon = exp(-abs(rd.y) * 7.5); col += vec3(0.018, 0.020, 0.024) * horizon;
+        return col;
+      }
+
+      vec3 studioBackground(vec2 fragCoord, vec3 rd) {
+        vec2 uv = fragCoord / u_resolution.xy; float grad = smoothstep(0.0, 1.0, uv.y);
+        vec3 screenGray = mix(vec3(0.045, 0.047, 0.052), vec3(0.126, 0.132, 0.145), grad);
+        return mix(environmentColor(rd), screenGray, 0.62);
+      }
+
+      float gridLine(float coord, float cells, float width) {
+        float x = coord * cells; float f = fract(x); float d = min(f, 1.0 - f);
+        float aa = max(fwidth(x), 0.0001); return 1.0 - smoothstep(width, width + aa, d);
+      }
+
+      vec3 ShadeShape(vec3 p, vec3 rd, float travelDist, int stepsTaken) {
+        vec3 n = GetNormal(p); vec3 viewDir = normalize(-rd);
+        vec3 rainbow = 0.5 + 0.5 * cos(PI * p.xyz + vec3(0.0, 2.0, 4.0));
+        vec3 q = normalize(morphedPoint(p));
+        float longitude = atan(q.z, q.x) / (2.0 * PI) + 0.5; float latitude  = acos(clamp(q.y, -1.0, 1.0)) / PI;
+        float lonGrid = gridLine(longitude, 24.0, 0.030); float latGrid = gridLine(latitude, 12.0, 0.032);
+        float grid = clamp(max(lonGrid, latGrid), 0.0, 1.0);
+        vec3 albedo = mix(rainbow, vec3(0.0), grid * 0.92);
+        vec3 mainLight = normalize(vec3(-0.55, 0.78, 0.34)); vec3 fillLight = normalize(vec3(0.65, 0.28, -0.72));
+        float diff = max(dot(n, mainLight), 0.0); float fill = max(dot(n, fillLight), 0.0);
+        vec3 halfVec = normalize(mainLight + viewDir); float spec = pow(max(dot(n, halfVec), 0.0), 64.0);
+        float ao = clamp(exp(-0.1 * travelDist), 0.42, 1.0);
+        vec3 color = albedo * (0.18 + 1.18 * diff + 0.34 * fill) * ao;
+        color += vec3(1.0, 0.93, 0.78) * spec * 0.92 * ao;
+        color += rainbow * pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.13;
+        return mix(color, vec3(0.001), grid * 0.48);
+      }
+
+      vec3 TraceShapeOrEnvironment(vec3 ro, vec3 rd) {
+        float tNear, tFar;
+        if (raySphere(ro, rd, BOUND_RADIUS + 0.035, tNear, tFar)) {
+          int stepsTaken; float t = RayMarchShape(ro, rd, max(tNear, 0.001), tFar, stepsTaken);
+          if (t > 0.0) return ShadeShape(ro + rd * t, rd, t, stepsTaken);
+        }
+        return environmentColor(rd);
+      }
+
+      vec3 ShadeFloor(vec3 p, vec3 rd, float tFloor) {
+        vec3 floorNormal = vec3(0.0, 1.0, 0.0); vec3 viewDir = normalize(-rd);
+        vec3 reflDir = normalize(reflect(rd, floorNormal));
+        vec3 reflected = TraceShapeOrEnvironment(p + floorNormal * 0.018, reflDir);
+        vec3 floorBase = vec3(0.012, 0.013, 0.016);
+        floorBase += max(gridLine(p.x, 0.50, 0.006), gridLine(p.z, 0.50, 0.006)) * vec3(0.025, 0.027, 0.032);
+        
+        float fresnel = pow(1.0 - clamp(dot(floorNormal, viewDir), 0.0, 1.0), 5.0);
+        vec3 color = mix(floorBase, reflected, mix(0.82, 0.985, fresnel));
+        
+        vec3 halfVec = normalize(normalize(vec3(-0.55, 0.78, 0.34)) + viewDir);
+        color += vec3(0.75, 0.85, 1.0) * pow(max(dot(floorNormal, halfVec), 0.0), 128.0) * 0.42;
+        color *= 1.0 - 0.22 * exp(-0.32 * dot(p.xz, p.xz));
+        return mix(environmentColor(rd), color, exp(-0.018 * tFloor));
+      }
+
+      void main() {
+        vec2 uv = gl_FragCoord.xy / u_resolution.xy;
+        vec2 screen = (gl_FragCoord.xy * 2.0 - u_resolution.xy) / u_resolution.y;
+        float focal = 1.0 / tan(0.5 * u_fov);
+        vec3 ro = u_camPos; vec3 rd = normalize((u_camToWorld * vec4(normalize(vec3(screen, -focal)), 0.0)).xyz);
+        vec3 color = studioBackground(gl_FragCoord.xy, rd);
+
+        float tShape = -1.0; int shapeSteps = 0; float tNear, tFar;
+        if (raySphere(ro, rd, BOUND_RADIUS + 0.035, tNear, tFar)) tShape = RayMarchShape(ro, rd, max(tNear, 0.0), tFar, shapeSteps);
+
+        float tFloor = -1.0; bool hasFloor = intersectFloor(ro, rd, tFloor);
+
+        if (tShape > 0.0 && (!hasFloor || tShape < tFloor)) color = ShadeShape(ro + rd * tShape, rd, tShape, shapeSteps);
+        else if (hasFloor) color = ShadeFloor(ro + rd * tFloor, rd, tFloor);
+
+        color *= mix(0.66, 1.0, smoothstep(0.94, 0.22, length(uv - 0.5)));
+        color = pow(clamp(color / (1.0 + color * 0.35), 0.0, 1.0), vec3(0.454545));
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.35));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const rayCamera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    
+    // I DROPPED THE CAMERA LOW AND OFFSET IT FOR A CINEMATIC SHOT
+    rayCamera.position.set(2.0, 0.6, 8.0); 
+
+    const controls = new OrbitControls(rayCamera, renderer.domElement);
+    controls.enableDamping = true; controls.dampingFactor = 0.055; 
+    controls.autoRotate = true; 
+    controls.autoRotateSpeed = 1.0; // Sped up the rotation slightly to show off reflections
+    
+    // ADJUSTED CAMERA TARGET TO LOOK SLIGHTLY DOWN AT THE FLOOR
+    controls.target.set(0, -0.3, 0); 
+    
+    controls.minDistance = 3.1; controls.maxDistance = 9.0;
+    controls.update();
+
+    controls.addEventListener("start", () => controls.autoRotate = false);
+
+    const quadScene = new THREE.Scene(); const quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+    const uniforms = {
+      u_resolution: { value: new THREE.Vector2() }, u_time: { value: 0 }, u_transition: { value: 0 },
+      u_camPos: { value: new THREE.Vector3() }, u_camToWorld: { value: new THREE.Matrix4() }, u_fov: { value: THREE.MathUtils.degToRad(rayCamera.fov) }
+    };
+
+    const shaderMaterial = new THREE.ShaderMaterial({ uniforms, vertexShader, fragmentShader, depthWrite: false });
+    quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), shaderMaterial));
+
+    // UI & Logic
+    const formulaEl = document.getElementById("formula"); const slider = document.getElementById("transitionSlider");
+    const valueReadout = document.getElementById("valueReadout"); const autoButton = document.getElementById("autoButton");
+    const stateButtons = [...document.querySelectorAll(".state-btn")];
+    let autoMorph = true, currentTransition = 0.0, targetTransition = 0.0, lastTime = performance.now();
+
+    function setAutoMorph(enabled) { autoMorph = enabled; autoButton.textContent = enabled ? "Auto-Morph: ON" : "Auto-Morph: OFF"; autoButton.classList.toggle("active", enabled); }
+    function termHTML(i) { return i <= 0 ? "p" : (i === 1 ? "f(p)" : `f<sup>${i}</sup>(p)`); }
+    function updateUIFromTransition(t) {
+      slider.value = t.toFixed(3); valueReadout.textContent = t.toFixed(3);
+      const nearest = Math.round(t);
+      formulaEl.innerHTML = Math.abs(t - nearest) < 0.025 ? `||${termHTML(nearest)}|| = 1` : (t > 3.975 ? `||${termHTML(4)}|| = 1` : `||mix(${termHTML(Math.floor(t))}, ${termHTML(Math.floor(t) + 1)}, ${(t - Math.floor(t)).toFixed(2)})|| = 1`);
+      stateButtons.forEach((btn, i) => btn.classList.toggle("active", i === nearest && Math.abs(t - i) < 0.35));
+    }
+
+    stateButtons.forEach((btn) => btn.addEventListener("click", () => { setAutoMorph(false); targetTransition = Number(btn.dataset.state); }));
+    slider.addEventListener("input", () => { setAutoMorph(false); targetTransition = Number(slider.value); currentTransition = targetTransition; });
+    autoButton.addEventListener("click", () => setAutoMorph(!autoMorph));
+
+    function resize() {
+      renderer.setSize(window.innerWidth, window.innerHeight); rayCamera.aspect = window.innerWidth / window.innerHeight;
+      rayCamera.updateProjectionMatrix(); uniforms.u_resolution.value.set(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+      uniforms.u_fov.value = THREE.MathUtils.degToRad(rayCamera.fov);
+    }
+    window.addEventListener("resize", resize); resize();
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const time = now * 0.001, dt = Math.min(0.05, (now - lastTime) * 0.001); lastTime = now;
+      if (autoMorph) targetTransition = 2.0 + 2.0 * Math.sin(time * 0.42 - Math.PI * 0.5);
+      currentTransition += (targetTransition - currentTransition) * (1.0 - Math.exp(-dt * 7.5));
+      currentTransition = THREE.MathUtils.clamp(currentTransition, 0, 4);
+
+      controls.update();
+      uniforms.u_time.value = time; uniforms.u_transition.value = currentTransition;
+      uniforms.u_camPos.value.copy(rayCamera.position); uniforms.u_camToWorld.value.copy(rayCamera.matrixWorld);
+      updateUIFromTransition(currentTransition); renderer.render(quadScene, quadCamera);
+    }
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
